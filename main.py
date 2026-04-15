@@ -11,14 +11,14 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 # /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text('Привет! Я эхо-бот. Напиши мне что-нибудь.')
+    await update.message.reply_text('Привет! Я бот. Напиши мне что-нибудь.')
 
 class States(Enum):
     UPLOAD = auto()
 
 # /upload
 async def upload_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await context.bot.send_message(chat_id=update.effective_chat.id, text='Отправь фото!')
+    await update.message.reply_text('Отправь фото!')
     return States.UPLOAD
 
 # Загрузка файла
