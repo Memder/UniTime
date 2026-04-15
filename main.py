@@ -2,8 +2,8 @@ import logging
 import os
 from enum import Enum, auto
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, ConversationHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, ConversationHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
 
 # Включаем логирование, чтобы видеть ошибки
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -41,6 +41,32 @@ upload_foto = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel)]
 )
 
+
+
+keyboard = [
+    [
+        InlineKeyboardButton('ФИИТ', callback_data=0),
+        InlineKeyboardButton('МОАИС', callback_data=1)
+    ],
+    [
+        InlineKeyboardButton('ПИвЗ', callback_data=2),
+        InlineKeyboardButton('ПИвЭ', callback_data=3)
+    ]
+]
+
+fkeys = InlineKeyboardMarkup(keyboard)
+
+async def choose_f(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text('Выберите направление:', reply_markup=fkeys)
+
+async def choosing_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Вы выбрали кнопку {data}")
+    print(data)
+
 if __name__ == '__main__':
     load_dotenv()
     TOKEN = os.getenv('BOT_TOKEN')
@@ -51,6 +77,9 @@ if __name__ == '__main__':
     app.add_handler(CommandHandler("start", start))
 
     app.add_handler(upload_foto)
+
+    app.add_handler(CommandHandler("choose", choose_f))
+    app.add_handler(CallbackQueryHandler(choosing_handler))
 
     print("Бот запущен...")
     # Запускаем бота в режиме поллинга (опроса сервера)
