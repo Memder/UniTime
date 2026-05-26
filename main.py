@@ -80,12 +80,5 @@ if __name__ == '__main__':
     for handler in handlers:
         app.add_handler(handler)
 
-    # Регистрация хендлеров
-    # app.add_handler(CommandHandler("start", start))
-
-    # app.add_handler(upload_foto)
-    # app.add_handler(CommandHandler("choose", choose_f))
-    # app.add_handler(CallbackQueryHandler(choosing_handler))
-
     print("Бот запущен...")
     app.run_polling()

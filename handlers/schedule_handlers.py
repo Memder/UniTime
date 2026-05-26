@@ -24,19 +24,13 @@ async def upload_schedule_start(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def upload_schedule_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка загруженного Excel файла"""
-    if not update.message.document:
-        await update.message.reply_text("❌ Пожалуйста, отправьте файл Excel (.xlsx)")
+    if not update.message.document or not update.message.document.file_name.endswith('.xlsx'):
+        await update.message.reply_text("❌ Пожалуйста, отправьте файл .xlsx")
         return UPLOAD_SCHEDULE_STATE
 
     document = update.message.document
-    if not document.file_name.endswith('.xlsx'):
-        await update.message.reply_text("❌ Неверный формат файла. Ожидается .xlsx")
-        return UPLOAD_SCHEDULE_STATE
+    await update.message.reply_text("⏳ Обрабатываю и загружаю расписание на завтра...")
 
-    await update.message.reply_text("⏳ Файл получен. Обрабатываю...")
-
-    # Скачиваем файл
     file = await document.get_file()
     temp_dir = "temp_schedules"
     os.makedirs(temp_dir, exist_ok=True)
@@ -45,15 +39,14 @@ async def upload_schedule_file(update: Update, context: ContextTypes.DEFAULT_TYP
     await file.download_to_drive(file_path)
 
     try:
-        await process_and_save_excel(file_path)
+        await process_and_save_excel(file_path, context=context)  # ← передаём context
         await update.message.reply_text(
-            "✅ Расписание успешно загружено в базу данных!\n"
-            "Теперь вы можете использовать команду /schedule <номер_группы>"
+            "✅ Расписание на завтра успешно загружено!\n"
+            "Уведомления отправлены студентам обновлённых групп."
         )
     except Exception as e:
-        await update.message.reply_text(f"❌ Ошибка при обработке расписания:\n{str(e)}")
+        await update.message.reply_text(f"❌ Ошибка при загрузке:\n{str(e)}")
     finally:
-        # Удаляем временный файл
         if os.path.exists(file_path):
             os.remove(file_path)
 

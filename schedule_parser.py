@@ -1,16 +1,10 @@
 from PIL import Image, ImageDraw, ImageFont
-
-"""
-Обновлённый парсер под реальный формат test_schedule.xlsx
-"""
-
 import re
 from dataclasses import dataclass
+from collections import defaultdict
 from pathlib import Path
-from datetime import datetime, time
-
+from datetime import datetime, timedelta
 from openpyxl import load_workbook
-
 from database import db
 
 
@@ -36,7 +30,7 @@ class GroupSchedule:
 
 
 async def save_schedule_to_db(schedule: GroupSchedule):
-    """Сохраняет расписание одной группы НА ЗАВТРА"""
+    """Сохраняет / обновляет расписание на завтра"""
     async with db.pool.acquire() as conn:
         group_id = await conn.fetchval(
             'SELECT id_g FROM "Group" WHERE group_number = $1',
@@ -47,7 +41,7 @@ async def save_schedule_to_db(schedule: GroupSchedule):
             print(f"⚠️ Группа {schedule.group_number} не найдена")
             return
 
-        # Удаляем старое расписание на завтра для этой группы
+        # Удаляем старые записи на завтра (чистое обновление)
         await conn.execute(
             """
             DELETE FROM Schedule 
@@ -58,7 +52,6 @@ async def save_schedule_to_db(schedule: GroupSchedule):
         )
 
         for lesson in schedule.lessons:
-            # Парсинг времени
             start_time = None
             end_time = None
             if '-' in lesson.time_str:
@@ -70,7 +63,6 @@ async def save_schedule_to_db(schedule: GroupSchedule):
                 except ValueError:
                     pass
 
-            # Ограничение длины
             subject_name = (lesson.subject_name or "Не указано")[:180]
             classroom_num = (lesson.classroom or "—")[:45]
 
@@ -96,12 +88,13 @@ async def save_schedule_to_db(schedule: GroupSchedule):
                 classroom_num
             )
 
-            # === Главное изменение: сохраняем на ЗАВТРА ===
+            # === Вставка / обновление расписания ===
             await conn.execute(
                 """
                 INSERT INTO Schedule 
                 (dates, start_time, end_time, id_group, id_subject, id_classroom, week_label)
                 VALUES (CURRENT_DATE + INTERVAL '1 day', $1, $2, $3, $4, $5, $6)
+                ON CONFLICT DO NOTHING
                 """,
                 start_time,
                 end_time,
@@ -111,7 +104,7 @@ async def save_schedule_to_db(schedule: GroupSchedule):
                 schedule.week_label
             )
 
-        print(f"✅ Сохранено на завтра: {schedule.group_label} | {len(schedule.lessons)} пар")
+        print(f"✅ Обновлено на завтра: {schedule.group_label} | {len(schedule.lessons)} пар")
 
 
 async def get_group_schedule_from_db(group_number: str, week_label: str = None) -> list[Lesson] | None:
@@ -143,7 +136,7 @@ async def get_group_schedule_from_db(group_number: str, week_label: str = None) 
         ) for r in rows]
 
 
-# ====================== ПАРСИНГ EXCEL (обновлённый) ======================
+# ====================== ПАРСИНГ EXCEL ======================
 
 def parse_lesson_text(raw_text: str) -> Lesson:
     """Улучшенный разбор текста занятия"""
@@ -237,65 +230,85 @@ def parse_excel(file_path: str) -> list[GroupSchedule]:
     return result
 
 
-async def process_and_save_excel(file_path: str):
-    """Основная функция загрузки"""
+async def process_and_save_excel(file_path: str, context=None):
+    """Полная обработка Excel + уведомления"""
     print(f"📂 Читаем файл: {file_path}")
     schedules = parse_excel(file_path)
 
     print(f"Найдено групп: {len(schedules)}")
 
-    for gs in schedules:
-        await save_schedule_to_db(gs)
+    updated_group_ids = []
 
-    print("🎉 Расписание успешно загружено в базу данных!")
+    for gs in schedules:
+        group_id = await get_group_id(gs.group_number)  # вспомогательная функция
+        if group_id:
+            await save_schedule_to_db(gs)
+            updated_group_ids.append(group_id)
+
+    print("🎉 Загрузка расписания завершена!")
+
+    # Отправляем уведомления
+    if updated_group_ids and context:
+        await notify_groups_about_update(updated_group_ids, context)
+
     return schedules
+
+
+# Вспомогательная функция
+async def get_group_id(group_number: str) -> int | None:
+    async with db.pool.acquire() as conn:
+        return await conn.fetchval(
+            'SELECT id_g FROM "Group" WHERE group_number = $1',
+            int(group_number)
+        )
 
 
 # ====================== ГЕНЕРАЦИЯ ИЗОБРАЖЕНИЯ ======================
 
-COLOR_HEADER_BG = (224, 160, 150)
+COLOR_HEADER_BG = (224, 100, 100)
 COLOR_HEADER_TEXT = (255, 255, 255)
 COLOR_TIME_BG = (245, 245, 245)
-COLOR_TIME_TEXT = (70, 70, 70)
+COLOR_TIME_TEXT = (60, 60, 60)
 COLOR_CELL_BG = (255, 255, 255)
 COLOR_CELL_TEXT = (30, 30, 30)
-COLOR_BORDER = (200, 200, 200)
-COLOR_EMPTY_BG = (250, 250, 250)
+COLOR_BORDER = (190, 190, 190)
+COLOR_WEEK_BG = (210, 70, 70)
 
-FONT_SIZE_HEADER = 32
-FONT_SIZE_SUBHEAD = 26
+FONT_SIZE_HEADER = 36
+FONT_SIZE_WEEK = 27
 FONT_SIZE_TIME = 22
 FONT_SIZE_CELL = 20
 
-COL_TIME_W = 160
-COL_GROUP_W = 520
-PADDING = 16
-IMG_WIDTH = COL_TIME_W + COL_GROUP_W
+COL_TIME_W = 195        # Увеличил ширину времени
+COL_LESSON_W = 485
+PADDING = 14
+IMG_WIDTH = COL_TIME_W + COL_LESSON_W
 
 
 def _font(size: int, bold: bool = False):
-    candidates = [
+    """Старый стиль шрифтов (DejaVu / Liberation)"""
+    candidates_bold = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
         "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
         "C:/Windows/Fonts/arialbd.ttf",
-        "C:/Windows/Fonts/Arial Bold.ttf",
-    ] if bold else [
+    ]
+    candidates = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
         "C:/Windows/Fonts/arial.ttf",
     ]
-    for path in candidates:
+    for path in (candidates_bold if bold else candidates):
         if Path(path).exists():
             return ImageFont.truetype(path, size)
     return ImageFont.load_default()
 
 
-def _wrap(text: str, font, max_w: int):
+def _wrap(text: str, font, max_w: int) -> list[str]:
+    if not text:
+        return [""]
     result = []
-    for paragraph in text.split("\n"):
+    for paragraph in text.split('\n'):
         words = paragraph.split()
-        if not words:
-            result.append("")
-            continue
         line = ""
         for word in words:
             test = (line + " " + word).strip()
@@ -310,43 +323,73 @@ def _wrap(text: str, font, max_w: int):
     return result or [""]
 
 
-def render_group_image(gs: GroupSchedule, output_path: str) -> str:
-    """Генерирует красивую картинку расписания"""
-    f_header = _font(FONT_SIZE_HEADER, bold=True)
-    f_subhead = _font(FONT_SIZE_SUBHEAD, bold=True)
-    f_time = _font(FONT_SIZE_TIME, bold=True)
-    f_cell = _font(FONT_SIZE_CELL, bold=False)
+def _format_time_range(time_str: str) -> str:
+    """Приводит время к формату '08:40–10:15' без секунд"""
+    if not time_str:
+        return ""
 
-    # Вычисляем высоту строк
+    # Если это уже строка с диапазоном
+    if '–' in time_str:
+        parts = time_str.split('–')
+    elif '-' in time_str:
+        parts = time_str.split('-')
+    else:
+        return time_str[:5]  # одиночное время
+
+    cleaned = []
+    for part in parts:
+        part = part.strip()
+        if ':' in part:
+            # Оставляем только HH:MM
+            cleaned.append(part[:5])
+        else:
+            cleaned.append(part)
+
+    return '–'.join(cleaned)
+
+
+def render_group_image(gs: GroupSchedule, output_path: str) -> str:
+    """Заголовок: 'Расписание для группы XXXX'"""
+    f_header = _font(FONT_SIZE_HEADER, bold=True)
+    f_week = _font(FONT_SIZE_WEEK, bold=True)
+    f_time = _font(FONT_SIZE_TIME, bold=True)
+    f_cell = _font(FONT_SIZE_CELL)
+
+    tomorrow = datetime.now() + timedelta(days=1)
+    date_str = tomorrow.strftime("%d.%m.%Y") + " (Завтра)"
+
+    # Заголовок с номером группы
+    group_title = f"Расписание для группы {gs.group_number}"
+
+    # Расчёт высоты строк
     row_heights = []
     for lesson in gs.lessons:
-        h_time = len(_wrap(lesson.time_str, f_time, COL_TIME_W - PADDING*2)) * 28 + PADDING*2
-        h_lesson = len(_wrap(lesson.raw_text or lesson.subject_name, f_cell, COL_GROUP_W - PADDING*2)) * 26 + PADDING*2
-        row_heights.append(max(80, h_time, h_lesson))
+        time_str = _format_time_range(lesson.time_str)
+        time_h = len(_wrap(time_str, f_time, COL_TIME_W - PADDING * 2)) * 29 + PADDING * 2
 
-    # Общая высота изображения
-    H_HEADER = 70
-    H_GROUP = 65
-    H_WEEK = 45
-    total_h = H_HEADER + H_GROUP + H_WEEK + sum(row_heights) + 20
+        lesson_text = f"{lesson.subject_name}\n{lesson.teacher_name}\n{lesson.classroom}".strip()
+        lesson_h = len(_wrap(lesson_text, f_cell, COL_LESSON_W - PADDING * 2)) * 26 + PADDING * 2
+
+        row_heights.append(max(88, time_h, lesson_h))
+
+    H_TOP = 95
+    H_WEEK = 58
+    total_h = H_TOP + H_WEEK + sum(row_heights) + 30
 
     img = Image.new("RGB", (IMG_WIDTH, total_h), COLOR_CELL_BG)
     draw = ImageDraw.Draw(img)
     y = 0
 
-    # Заголовок: Направление
-    draw.rectangle([0, y, IMG_WIDTH, y + H_HEADER], fill=COLOR_HEADER_BG)
-    draw.text((IMG_WIDTH//2 - f_header.getbbox(gs.direction)[2]//2, y + 18), gs.direction, font=f_header, fill=COLOR_HEADER_TEXT)
-    y += H_HEADER
+    # Главный заголовок с группой
+    draw.rectangle([0, y, IMG_WIDTH, y + H_TOP], fill=COLOR_HEADER_BG)
+    title_w = f_header.getbbox(group_title)[2]
+    draw.text(((IMG_WIDTH - title_w) // 2, y + 26), group_title, font=f_header, fill=COLOR_HEADER_TEXT)
+    y += H_TOP
 
-    # Номер группы
-    draw.rectangle([0, y, IMG_WIDTH, y + H_GROUP], fill=COLOR_HEADER_BG)
-    draw.text((IMG_WIDTH//2 - f_header.getbbox(gs.group_label)[2]//2, y + 15), gs.group_label, font=f_header, fill=COLOR_HEADER_TEXT)
-    y += H_GROUP
-
-    # Неделя
-    draw.rectangle([0, y, IMG_WIDTH, y + H_WEEK], fill=(200, 100, 100))
-    draw.text((IMG_WIDTH//2 - f_subhead.getbbox(gs.week_label)[2]//2, y + 10), gs.week_label, font=f_subhead, fill=COLOR_HEADER_TEXT)
+    # Дата
+    draw.rectangle([0, y, IMG_WIDTH, y + H_WEEK], fill=COLOR_WEEK_BG)
+    date_w = f_week.getbbox(date_str)[2]
+    draw.text(((IMG_WIDTH - date_w) // 2, y + 14), date_str, font=f_week, fill=COLOR_HEADER_TEXT)
     y += H_WEEK
 
     # Пары
@@ -354,22 +397,31 @@ def render_group_image(gs: GroupSchedule, output_path: str) -> str:
         draw.rectangle([0, y, IMG_WIDTH, y + row_h], fill=COLOR_CELL_BG)
         draw.rectangle([0, y, COL_TIME_W, y + row_h], fill=COLOR_TIME_BG)
 
-        # Время
-        draw.text((PADDING, y + PADDING), lesson.time_str, font=f_time, fill=COLOR_TIME_TEXT)
+        # Время начала — конец
+        time_str = _format_time_range(lesson.time_str)
+        time_lines = _wrap(time_str, f_time, COL_TIME_W - PADDING * 2)
+        for i, line in enumerate(time_lines):
+            draw.text((PADDING + 4, y + PADDING + i * 29), line, font=f_time, fill=COLOR_TIME_TEXT)
 
-        # Занятие
-        lesson_text = lesson.raw_text or f"{lesson.subject_name}\n{lesson.teacher_name}\n{lesson.classroom}"
-        lines = _wrap(lesson_text, f_cell, COL_GROUP_W - PADDING*2)
-        for i, line in enumerate(lines):
-            draw.text((COL_TIME_W + PADDING, y + PADDING + i*26), line, font=f_cell, fill=COLOR_CELL_TEXT)
+        # Предмет + преподаватель + кабинет
+        lesson_text = lesson.subject_name.strip()
+        if lesson.teacher_name:
+            lesson_text += f"\n{lesson.teacher_name}"
+        if lesson.classroom:
+            lesson_text += f"\n{lesson.classroom}"
+
+        lesson_lines = _wrap(lesson_text, f_cell, COL_LESSON_W - PADDING * 2)
+        for i, line in enumerate(lesson_lines):
+            draw.text((COL_TIME_W + PADDING, y + PADDING + i * 26), line, font=f_cell, fill=COLOR_CELL_TEXT)
 
         # Границы
         draw.line([(0, y + row_h), (IMG_WIDTH, y + row_h)], fill=COLOR_BORDER, width=1)
-        draw.line([(COL_TIME_W, y), (COL_TIME_W, y + row_h)], fill=COLOR_BORDER, width=1)
+        draw.line([(COL_TIME_W, y), (COL_TIME_W, y + row_h)], fill=COLOR_BORDER, width=2)
+
         y += row_h
 
     # Внешняя рамка
-    draw.rectangle([0, 0, IMG_WIDTH-1, total_h-1], outline=COLOR_BORDER, width=3)
+    draw.rectangle([0, 0, IMG_WIDTH - 1, total_h - 1], outline=(160, 160, 160), width=4)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     img.save(output_path, "PNG")
@@ -413,3 +465,39 @@ async def get_tomorrow_schedule_for_user(telegram_id: int) -> list[Lesson] | Non
             teacher_name=r['teacher_name'],
             classroom=r['classroom'] or ""
         ) for r in rows]
+
+# ====================== УВЕДОМЛЕНИЯ ======================
+
+async def notify_groups_about_update(updated_groups: list[int], context=None):
+    """Отправляет уведомление всем пользователям обновлённых групп"""
+    if not context or not updated_groups:
+        return
+
+    async with db.pool.acquire() as conn:
+        users = await conn.fetch(
+            """
+            SELECT telegram_id, id_group 
+            FROM Users 
+            WHERE id_group = ANY($1) AND telegram_id IS NOT NULL
+            """,
+            updated_groups
+        )
+
+    if not users:
+        print("ℹ️ Никто не зарегистрирован в обновлённых группах")
+        return
+
+    success_count = 0
+    for user in users:
+        try:
+            await context.bot.send_message(
+                chat_id=user['telegram_id'],
+                text="🔔 Расписание на завтра обновлено!\n\n"
+                     "Используй команду /schedule, чтобы посмотреть актуальное расписание.",
+                parse_mode='HTML'
+            )
+            success_count += 1
+        except Exception as e:
+            print(f"Не удалось отправить уведомление пользователю {user['telegram_id']}: {e}")
+
+    print(f"✅ Уведомления отправлены {success_count} пользователям из {len(updated_groups)} групп")
